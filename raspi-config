@@ -8,6 +8,8 @@ ASK_TO_REBOOT=0
 BLACKLIST=/etc/modprobe.d/raspi-blacklist.conf
 CONFIG=/boot/config.txt
 
+USER=${SUDO_USER:-$(who -m | awk '{ print $1 }')}
+
 is_pi () {
   ARCH=$(dpkg --print-architecture)
   if [ "$ARCH" = "armhf" ] ; then
@@ -443,8 +445,8 @@ do_pixdub() {
 }
 
 do_change_pass() {
-  whiptail --msgbox "You will now be asked to enter a new password for the $SUDO_USER user" 20 60 1
-  passwd $SUDO_USER &&
+  whiptail --msgbox "You will now be asked to enter a new password for the $USER user" 20 60 1
+  passwd $USER &&
   whiptail --msgbox "Password changed successfully" 20 60 1
 }
 
@@ -756,7 +758,9 @@ do_ssh() {
     DEFAULT=
   fi
   if [ "$INTERACTIVE" = True ]; then
-    whiptail --yesno "Would you like the SSH server to be enabled?" $DEFAULT 20 60 2
+    whiptail --yesno \
+      "Would you like the SSH server to be enabled?\n\nCaution: Default and weak passwords are a security risk when SSH is enabled!" \
+      $DEFAULT 20 60 2
     RET=$?
   else
     RET=$1
@@ -798,15 +802,18 @@ do_vnc() {
     RET=$1
   fi
   if [ $RET -eq 0 ]; then
-    if [ ! -d /usr/share/doc/realvnc-vnc-server ] ; then
-        apt-get install realvnc-vnc-server
+    if [ -d /usr/share/doc/realvnc-vnc-server ] || apt-get install realvnc-vnc-server; then
+      systemctl enable vncserver-x11-serviced.service &&
+      systemctl start vncserver-x11-serviced.service &&
+      STATUS=enabled
+    else
+      return 1
     fi
-    systemctl enable vncserver-x11-serviced.service &&
-    systemctl start vncserver-x11-serviced.service &&
-    STATUS=enabled
   elif [ $RET -eq 1 ]; then
-    systemctl disable vncserver-x11-serviced.service &&
-    systemctl stop vncserver-x11-serviced.service &&
+    if [ ! -d /usr/share/doc/realvnc-vnc-server ] ; then
+        systemctl disable vncserver-x11-serviced.service
+        systemctl stop vncserver-x11-serviced.service
+    fi
     STATUS=disabled
   else
     return $RET
@@ -1116,9 +1123,9 @@ do_boot_behaviour() {
   if [ "$INTERACTIVE" = True ]; then
     BOOTOPT=$(whiptail --title "Raspberry Pi Software Configuration Tool (raspi-config)" --menu "Boot Options" $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT \
       "B1 Console" "Text console, requiring user to login" \
-      "B2 Console Autologin" "Text console, automatically logged in as '$SUDO_USER' user" \
+      "B2 Console Autologin" "Text console, automatically logged in as '$USER' user" \
       "B3 Desktop" "Desktop GUI, requiring user to login" \
-      "B4 Desktop Autologin" "Desktop GUI, automatically logged in as '$SUDO_USER' user" \
+      "B4 Desktop Autologin" "Desktop GUI, automatically logged in as '$USER' user" \
       3>&1 1>&2 2>&3)
   else
     BOOTOPT=$1
@@ -1137,7 +1144,7 @@ do_boot_behaviour() {
         cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf << EOF
 [Service]
 ExecStart=
-ExecStart=-/sbin/agetty --autologin $SUDO_USER --noclear %I \$TERM
+ExecStart=-/sbin/agetty --autologin $USER --noclear %I \$TERM
 EOF
         ;;
       B3*)
@@ -1159,9 +1166,9 @@ EOF
           cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf << EOF
 [Service]
 ExecStart=
-ExecStart=-/sbin/agetty --autologin $SUDO_USER --noclear %I \$TERM
+ExecStart=-/sbin/agetty --autologin $USER --noclear %I \$TERM
 EOF
-          sed /etc/lightdm/lightdm.conf -i -e "s/^\(#\|\)autologin-user=.*/autologin-user=$SUDO_USER/"
+          sed /etc/lightdm/lightdm.conf -i -e "s/^\(#\|\)autologin-user=.*/autologin-user=$USER/"
           disable_raspi_config_at_boot
         else
           whiptail --msgbox "Do 'sudo apt-get install lightdm' to allow configuration of boot to desktop" 20 60 2
@@ -1423,8 +1430,13 @@ do_gldriver() {
     whiptail --msgbox "Driver and kernel not present on your system. Please update" 20 60 2
     return 1
   fi
-  if [ $(dpkg -l libgl1-mesa-dri | tail -n 1 | cut -d ' ' -f 1) != "ii" ]; then
-    whiptail --msgbox "libgl1-mesa-dri not found - please install" 20 60 2
+  for package in gldriver-test libgl1-mesa-dri; do
+    if [ "$(dpkg -l "$package" 2> /dev/null | tail -n 1 | cut -d ' ' -f 1)" != "ii" ]; then
+      missing_packages="$package $missing_packages"
+    fi
+  done
+  if [ -n "$missing_packages" ] && ! apt-get install $missing_packages; then
+    whiptail --msgbox "Required packages not found, please install: ${missing_packages}" 20 60 2
     return 1
   fi
   if is_pifour ; then
@@ -2384,10 +2396,15 @@ do_proxy_menu() {
 if [ "$INTERACTIVE" = True ]; then
   [ -e $CONFIG ] || touch $CONFIG
   calc_wt_size
+  while [ "$USER" = "root" ] || [ -z "$USER" ]; do
+    if ! USER=$(whiptail --inputbox "raspi-config could not determine the default user.\\n\\nWhat user should these settings apply to?" 20 60 pi 3>&1 1>&2 2>&3); then
+      return 0
+    fi
+  done
   while true; do
     if is_pi ; then
       FUN=$(whiptail --title "Raspberry Pi Software Configuration Tool (raspi-config)" --backtitle "$(cat /proc/device-tree/model)" --menu "Setup Options" $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT --cancel-button Finish --ok-button Select \
-        "1 Change User Password" "Change password for the current user" \
+        "1 Change User Password" "Change password for the '$USER' user" \
         "2 Network Options" "Configure network settings" \
         "3 Boot Options" "Configure options for start-up" \
         "4 Localisation Options" "Set up language and regional settings to match your location" \
@@ -2399,7 +2416,7 @@ if [ "$INTERACTIVE" = True ]; then
         3>&1 1>&2 2>&3)
     else
       FUN=$(whiptail --title "Raspberry Pi Software Configuration Tool (raspi-config)" --menu "Setup Options" $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT --cancel-button Finish --ok-button Select \
-        "1 Change User Password" "Change password for the current user" \
+        "1 Change User Password" "Change password for the '$USER' user" \
         "2 Network Options" "Configure network settings" \
         "3 Boot Options" "Configure options for start-up" \
         "4 Localisation Options" "Set up language and regional settings to match your location" \
